@@ -111,6 +111,100 @@ struct
                  (["alpha","bravo","charlie","delta","echo","foxtrot"], B.keys sw)
       val () = checkInt "string find" (7, valOf (B.find sc sw "charlie"))
       val () = checkBool "string absent" (false, B.member sc sw "golf")
+
+      val () = section "insertWith / adjust / update"
+      val acc0 = B.empty : (string, int) B.tree
+      val acc1 = B.insertWith sc op+ acc0 "a" 1
+      val acc2 = B.insertWith sc op+ acc1 "a" 10
+      val acc3 = B.insertWith sc op+ acc2 "b" 5
+      val () = checkInt "insertWith combines (1+10)" (11, valOf (B.find sc acc3 "a"))
+      val () = checkInt "insertWith fresh key" (5, valOf (B.find sc acc3 "b"))
+      val () = checkInt "insertWith size" (2, B.size acc3)
+      val adj = B.adjust ic (fn v => v + 1) big 100
+      val () = checkInt "adjust present" (201, valOf (B.find ic adj 100))
+      val () = checkInt "adjust missing no-op size" (200, B.size (B.adjust ic (fn v => v) big 999))
+      val upIns = B.update ic (fn _ => SOME 2500) big 250
+      val () = checkInt "update inserts" (2500, valOf (B.find ic upIns 250))
+      val () = checkInt "update insert size" (201, B.size upIns)
+      val upDel = B.update ic (fn _ => NONE) big 100
+      val () = checkBool "update NONE deletes" (false, B.member ic upDel 100)
+      val () = checkInt "update delete size" (199, B.size upDel)
+      val upMod = B.update ic (fn SOME v => SOME (v + 5) | NONE => NONE) big 100
+      val () = checkInt "update modifies" (205, valOf (B.find ic upMod 100))
+
+      val () = section "folds / app / mapValues / filter"
+      val sumKeys = B.foldl (fn (k, _, a) => a + k) 0 big
+      val () = checkInt "foldl sum keys 1..200" (200 * 201 div 2, sumKeys)
+      val () = checkBool "foldl ascending order"
+                 (true, isSorted ic (List.rev (B.foldl (fn (k,_,a) => k :: a) [] big)))
+      val () = checkBool "foldr descending accumulation"
+                 (true, isSorted ic (B.foldr (fn (k,_,a) => k :: a) [] big))
+      val cnt = ref 0
+      val () = B.app (fn _ => cnt := !cnt + 1) big
+      val () = checkInt "app visits all" (200, !cnt)
+      val mv = B.mapValues (fn v => v + 1) big
+      val () = checkInt "mapValues" (101, valOf (B.find ic mv 50))
+      val () = checkIntList "mapValues keeps keys" (sorted200, B.keys mv)
+      val evens = B.filter ic (fn (k, _) => k mod 2 = 0) big
+      val () = checkInt "filter size (evens 1..200)" (100, B.size evens)
+      val () = checkBool "filter content" (true, List.all (fn k => k mod 2 = 0) (B.keys evens))
+
+      val () = section "min / max / floor / ceiling / pred / succ"
+      val () = checkInt "min key" (1, #1 (valOf (B.min big)))
+      val () = checkInt "max key" (200, #1 (valOf (B.max big)))
+      val () = checkBool "min empty NONE" (true, B.min e = NONE)
+      val () = checkBool "max empty NONE" (true, B.max e = NONE)
+      val () = checkInt "floor 100 = 100" (100, #1 (valOf (B.floor ic big 100)))
+      val () = checkInt "ceiling 100 = 100" (100, #1 (valOf (B.ceiling ic big 100)))
+      val sparse = B.fromList ic (List.map (fn k => (k, k)) [10,20,30,40,50])
+      val () = checkInt "floor 25 = 20" (20, #1 (valOf (B.floor ic sparse 25)))
+      val () = checkInt "ceiling 25 = 30" (30, #1 (valOf (B.ceiling ic sparse 25)))
+      val () = checkBool "floor below min NONE" (true, B.floor ic sparse 5 = NONE)
+      val () = checkBool "ceiling above max NONE" (true, B.ceiling ic sparse 99 = NONE)
+      val () = checkInt "predecessor 30 = 20" (20, #1 (valOf (B.predecessor ic sparse 30)))
+      val () = checkInt "successor 30 = 40" (40, #1 (valOf (B.successor ic sparse 30)))
+      val () = checkBool "predecessor of min NONE" (true, B.predecessor ic sparse 10 = NONE)
+      val () = checkBool "successor of max NONE" (true, B.successor ic sparse 50 = NONE)
+
+      val () = section "rangeFold"
+      val rfSum = B.rangeFold ic (fn (k, _, a) => a + k) 0 big 50 60
+      val () = checkInt "rangeFold sum [50..60]" (List.foldl op+ 0 [50,51,52,53,54,55,56,57,58,59,60], rfSum)
+      val () = checkIntList "rangeFold keys match rangeQuery"
+                 (List.map #1 (B.rangeQuery ic big 50 60),
+                  List.rev (B.rangeFold ic (fn (k,_,a) => k :: a) [] big 50 60))
+      val () = checkInt "rangeFold empty hi<lo" (0, B.rangeFold ic (fn (_,_,a) => a+1) 0 big 60 50)
+
+      val () = section "delete with rebalancing + invariants"
+      val () = checkBool "invariants hold (big)" (true, B.checkInvariants ic big)
+      (* delete every key one at a time from a scrambled order, checking
+         invariants and membership after each removal *)
+      val delOrder = perm 200 91   (* gcd(91,200)=1 -> bijection *)
+      fun delLoop (t, []) = t
+        | delLoop (t, k :: ks) =
+            let
+              val t' = B.delete ic t k
+              val ok = B.checkInvariants ic t'
+              val gone = not (B.member ic t' k)
+            in
+              if ok andalso gone then delLoop (t', ks)
+              else raise Fail ("delete broke at key " ^ Int.toString k)
+            end
+      val emptied =
+        (delLoop (big, delOrder); true) handle Fail _ => false
+      val () = checkBool "delete-all keeps invariants + removes" (true, emptied)
+      val finalT = delLoop (big, delOrder)
+      val () = checkBool "tree empty after deleting all" (true, B.isEmpty finalT)
+      val () = checkInt "size 0 after deleting all" (0, B.size finalT)
+      (* partial deletion preserves remaining keys and order *)
+      val half = delLoop (big, List.filter (fn k => k mod 2 = 0) sorted200)
+      val () = checkInt "deleted evens -> 100 left" (100, B.size half)
+      val () = checkIntList "remaining are odds"
+                 (List.filter (fn k => k mod 2 = 1) sorted200, B.keys half)
+      val () = checkBool "invariants after partial delete" (true, B.checkInvariants ic half)
+      val () = checkBool "delete absent is no-op"
+                 (true, B.size (B.delete ic big 999) = 200)
+      val () = checkInt "delete then find absent"
+                 (0, (case B.find ic (B.delete ic sparse 30) 30 of SOME _ => 1 | NONE => 0))
     in
       Harness.run ()
     end
